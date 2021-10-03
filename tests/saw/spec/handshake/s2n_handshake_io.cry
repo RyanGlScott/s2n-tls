@@ -27,6 +27,7 @@ conn_set_pre_tls13_handshake_type conn = conn'
                 ,server_can_send_ocsp = conn.server_can_send_ocsp
                 ,key_exchange_eph = conn.key_exchange_eph
                 ,client_auth_flag = conn.client_auth_flag
+                ,client_session_resumed = conn.client_session_resumed
                 ,actual_protocol_version = conn.actual_protocol_version
                 ,no_client_cert = conn.no_client_cert
                 ,early_data_state = conn.early_data_state
@@ -36,9 +37,9 @@ conn_set_pre_tls13_handshake_type conn = conn'
         (handshake' : handshake) = {handshake_type = handshake_type'
                                    ,message_number = conn.handshake.message_number
                                    }
-        handshake_type' = NEGOTIATED || full_handshake ||
-                            (if (full_handshake != 0) then
-                              perfect_forward_secrecy || ocsp_status || client_auth
+        handshake_type' = NEGOTIATED || client_auth ||
+                            (if (~is_client_session_resumed) then
+                              full_handshake || perfect_forward_secrecy || ocsp_status
                               else zero)
         full_handshake  = if (conn.is_caching_enabled /\ ~conn.resume_from_cache)
                           then zero
@@ -52,6 +53,7 @@ conn_set_pre_tls13_handshake_type conn = conn'
         client_auth = if conn.client_auth_flag
                       then CLIENT_AUTH
                       else zero
+        is_client_session_resumed = conn.mode == S2N_CLIENT /\ conn.client_session_resumed
 
 // This function models the update of the s2n_connection struct by the
 // s2n_conn_set_tls13_handshake_type function in s2n.
@@ -66,6 +68,7 @@ conn_set_tls13_handshake_type conn = conn'
                 ,server_can_send_ocsp = conn.server_can_send_ocsp
                 ,key_exchange_eph = conn.key_exchange_eph
                 ,client_auth_flag = conn.client_auth_flag
+                ,client_session_resumed = conn.client_session_resumed
                 ,actual_protocol_version = conn.actual_protocol_version
                 ,no_client_cert = conn.no_client_cert
                 ,early_data_state = conn.early_data_state
@@ -103,6 +106,7 @@ advance_message conn = conn2
                 ,server_can_send_ocsp = conn.server_can_send_ocsp
                 ,key_exchange_eph = conn.key_exchange_eph
                 ,client_auth_flag = conn.client_auth_flag
+                ,client_session_resumed = conn.client_session_resumed
                 ,actual_protocol_version = conn.actual_protocol_version
                 ,no_client_cert = conn.no_client_cert
                 ,early_data_state = conn.early_data_state
@@ -132,6 +136,7 @@ conn_set_handshake_no_client_cert conn = conn2
                 ,server_can_send_ocsp = conn.server_can_send_ocsp
                 ,key_exchange_eph = conn.key_exchange_eph
                 ,client_auth_flag = conn.client_auth_flag
+                ,client_session_resumed = conn.client_session_resumed
                 ,actual_protocol_version = conn.actual_protocol_version
                 ,no_client_cert = conn.no_client_cert
                 ,early_data_state = conn.early_data_state
@@ -210,6 +215,7 @@ type connection = {handshake : handshake
                   ,server_can_send_ocsp : Bit
                   ,key_exchange_eph : Bit
                   ,client_auth_flag : Bit //whether the server will request client cert
+                  ,client_session_resumed : Bit
                   ,actual_protocol_version : [8]
                   ,no_client_cert : Bit
                   ,early_data_state : [32]

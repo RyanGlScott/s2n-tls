@@ -348,6 +348,7 @@ testConnection = {
             server_can_send_ocsp = False,
             key_exchange_eph = False,
             client_auth_flag = False,
+            client_session_resumed = False,
             actual_protocol_version = 0x22,
             no_client_cert = True,
             early_data_state = zero,

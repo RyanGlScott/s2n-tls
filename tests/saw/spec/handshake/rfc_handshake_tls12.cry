@@ -119,11 +119,13 @@ connectionParameters conn params =
     conn.server_can_send_ocsp == params.sendCertificateStatus
  /\ ((conn.key_exchange_eph /\ ~keyExchangeNonEphemeral params /\ params.keyExchange != DH_anon) \/
      (~conn.key_exchange_eph /\ keyExchangeNonEphemeral params))
- /\ (conn.is_caching_enabled /\ ~conn.resume_from_cache) == params.sessionTicket
+ /\ (is_client_session_resumed \/ (conn.is_caching_enabled /\ ~conn.resume_from_cache))
+     == params.sessionTicket
  /\ (~params.includeSessionTicket) // s2n server does not issue tickets at this time
  /\ (~params.renewSessionTicket) // s2n server does not issue tickets at this time
  /\ conn.client_auth_flag == params.requestClientCert
  /\ conn.actual_protocol_version != S2N_TLS13
+  where is_client_session_resumed = conn.mode == S2N_CLIENT /\ conn.client_session_resumed
 
 // A predicate that tells whether key-exchange is non-ephemeral and uses server certificate
 // data for exchanging a premaster secret (RFC 5246 7.4.3). In this case the key exchange

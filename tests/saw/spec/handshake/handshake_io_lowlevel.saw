@@ -224,18 +224,16 @@ let setup_connection_common chosen_psk_null = do {
    let corked_io = {{ bitfield_is_set conn_bitfield_value conn_corked_io_index : Bit }};
    crucible_precond corked_io;
 
-   // ...we assume that the client_session_resumed bit in s2n_connection must
-   // be zero...
-   crucible_precond {{ ~(bitfield_is_set conn_bitfield_value conn_client_session_resumed_index) }};
-
    // ...we currently require that the use_tickets bit in s2n_config must be
    // zero...
    crucible_precond {{ ~(bitfield_is_set config_bitfield_value config_use_tickets_index) }};
 
    // ...on the other hand, the quic_enabled bits in both s2n_connection and
-   // s2n_config are allowed to be either 0 or 1. As such, we don't need to
+   // s2n_config, as well as the client_session_resumed bit in s2n_connection,
+   // are allowed to be either 0 or 1. As such, we don't need to
    // impose any direct constraints on them. We simply query which values
    // they have taken on during simulation and remember them for later.
+   let client_session_resumed_bit = {{ bitfield_is_set conn_bitfield_value conn_client_session_resumed_index }};
    let quic_enabled_bit = {{    bitfield_is_set conn_bitfield_value conn_quic_enabled_index
                              \/ bitfield_is_set config_bitfield_value config_quic_enabled_index
                           }};
@@ -275,6 +273,7 @@ let setup_connection_common chosen_psk_null = do {
                      ,resume_from_cache = False
                      ,client_auth_flag = if mode == S2N_CLIENT then client_cert_auth_type == S2N_CERT_AUTH_REQUIRED else
                                          if mode == S2N_SERVER then client_cert_auth_type != S2N_CERT_AUTH_NONE     else False
+                     ,client_session_resumed = client_session_resumed_bit
                      ,no_client_cert = no_client_cert != zero
                      ,actual_protocol_version = version
                      ,early_data_state = early_data_state
