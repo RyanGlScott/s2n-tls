@@ -1,0 +1,892 @@
+enable_experimental;
+// lax_loads_and_stores is needed to support the uses of
+// llvm_points_to_bitfield in the specifications below. As a result, SAW will
+// return fresh, symbolic values when it reads from uninitialized memory. Make
+// sure all of the arguments are initialized in the preconditions of a
+// specification, or else SAW will fill them in with underconstrained symbolic
+// values!
+enable_lax_loads_and_stores;
+
+// let setup_connection_common chosen_psk_null = do {
+//    pconn <- crucible_alloc (llvm_struct "struct.s2n_connection");
+//
+//    version <- crucible_fresh_var "version" (llvm_int 8);
+//    crucible_precond {{ version != S2N_UNKNOWN_PROTOCOL_VERSION /\ version <= S2N_TLS13 }};
+//    crucible_points_to (crucible_field pconn "actual_protocol_version") (crucible_term version);
+//
+//    mode <- crucible_fresh_var "mode" (llvm_int 32);
+//    crucible_points_to (conn_mode pconn) (crucible_term mode);
+//
+//    handshake_type <- crucible_fresh_var "handshake_type" (llvm_int 32);
+//    crucible_points_to (conn_handshake_handshake_type pconn)
+//                       (crucible_term handshake_type);
+//
+//    message_number <- crucible_fresh_var "message_number" (llvm_int 32);
+//    crucible_points_to (conn_handshake_message_number pconn)
+//                       (crucible_term message_number);
+//
+//    cork_val <- crucible_fresh_var "corked" (llvm_int 2);
+//    crucible_ghost_value corked cork_val;
+//
+//    cca_ov <- crucible_fresh_var "cca_ov" (llvm_int 8);
+//    crucible_points_to (cca_type_ov pconn) (crucible_term cca_ov);
+//
+//    cca <- crucible_fresh_var "cca" (llvm_int 32);
+//    crucible_points_to (cca_type pconn) (crucible_term cca);
+//
+//    cipher_suite <- crucible_alloc (llvm_struct "struct.s2n_cipher_suite");
+//    crucible_points_to (conn_secure_cipher_suite pconn)  cipher_suite;
+//
+//    kea <- crucible_alloc (llvm_struct "struct.s2n_kex");
+//    crucible_points_to (key_exchange_algorithm cipher_suite) kea;
+//
+//    eph_flag <- crucible_fresh_var "eph_flag" (llvm_int 8);
+//    crucible_points_to (kea_is_ephemeral kea) (crucible_term eph_flag);
+//
+//    config <- crucible_alloc (llvm_struct "struct.s2n_config");
+//    crucible_points_to (conn_config pconn) config;
+//
+//    config_cca <- crucible_fresh_var "config_cca" (llvm_int 32);
+//    crucible_points_to (config_cca_type config) (crucible_term config_cca);
+//
+//    cak <- crucible_alloc (llvm_struct "struct.s2n_cert_chain_and_key");
+//    crucible_points_to (conn_chain_and_key pconn) cak;
+//
+//    status_size <- crucible_fresh_var "status_size" (llvm_int 32);
+//    crucible_points_to (ocsp_status_size cak) (crucible_term status_size);
+//    crucible_equal (crucible_term status_size) (crucible_term {{zero : [32]}});
+//
+//    // We assume that corking/uncorking is managed by s2n, so set the corked_io
+//    // bit in s2n_connection to one...
+//    let corked_io = {{ True }};
+//    llvm_points_to_bitfield pconn "corked_io" (llvm_term {{ bit_to_bv1 corked_io }});
+//
+//    // ...we assume that the client_session_resumed bit in s2n_connection must
+//    // be zero...
+//    llvm_points_to_bitfield pconn "client_session_resumed" (llvm_term {{ 0 : [1] }});
+//
+//    // ...we currently require that the use_tickets bit in s2n_config must be
+//    // zero...
+//    llvm_points_to_bitfield config "use_tickets" (llvm_term {{ 0 : [1] }});
+//
+//    // ...on the other hand, the quic_enabled bits in both s2n_connection and
+//    // s2n_config are allowed to be either 0 or 1. As such, we don't need to
+//    // impose any direct constraints on them. We simply query which values
+//    // they have taken on during simulation and remember them for later.
+//    conn_quic_enabled <- llvm_fresh_var "conn_quic_enabled" (llvm_int 1);
+//    llvm_points_to_bitfield pconn "quic_enabled" (llvm_term conn_quic_enabled);
+//    config_quic_enabled <- llvm_fresh_var "config_quic_enabled" (llvm_int 1);
+//    llvm_points_to_bitfield config "quic_enabled" (llvm_term config_quic_enabled);
+//    let quic_enabled_bit = {{ bv1_to_bit conn_quic_enabled \/ bv1_to_bit config_quic_enabled }};
+//
+//    session_ticket_status <- crucible_fresh_var "session_ticket_status" (llvm_int 32);
+//    crucible_points_to (conn_session_ticket_status pconn) (crucible_term session_ticket_status);
+//
+//    ocsp_flag <- crucible_fresh_var "ocsp_flag" (llvm_int 32);
+//    crucible_points_to (conn_status_type pconn) (crucible_term ocsp_flag);
+//
+//    if chosen_psk_null
+//       then crucible_points_to (conn_chosen_psk pconn) crucible_null
+//       else do { chosen_psk <- crucible_alloc (llvm_struct "struct.s2n_psk");
+//                 crucible_points_to (conn_chosen_psk pconn) chosen_psk;
+//               };
+//    let chosen_psk_null_bit = if chosen_psk_null then {{ True }} else {{ False }};
+//
+//    early_data_state <- crucible_fresh_var "early_data_state" (llvm_int 32);
+//    crucible_points_to (conn_early_data_state pconn) (crucible_term early_data_state);
+//
+//    no_client_cert <- crucible_fresh_var "no_client_cert" (llvm_int 8);
+//
+//    let client_cert_auth_type = {{ if cca_ov != 0 then cca else config_cca }};
+//
+//    // This returns a connection containing a handshake. If the connection or the handshake
+//    // definitions are changed, they must also be changed here.
+//    return (pconn, {{ {corked_io = corked_io
+//                      ,mode      = mode
+//                      ,handshake = {message_number = message_number
+//                                   ,handshake_type = handshake_type}
+//                      ,corked    = cork_val
+//                      ,is_caching_enabled = False
+//                      ,key_exchange_eph = eph_flag != zero
+//                      ,server_can_send_ocsp =
+//                             ((ocsp_flag == 1) && (status_size > 0)) ||
+//                             ((mode == 1) && (ocsp_flag == 1))
+//                      ,resume_from_cache = False
+//                      ,client_auth_flag = if mode == S2N_CLIENT then client_cert_auth_type == S2N_CERT_AUTH_REQUIRED else
+//                                          if mode == S2N_SERVER then client_cert_auth_type != S2N_CERT_AUTH_NONE     else False
+//                      ,no_client_cert = no_client_cert != zero
+//                      ,actual_protocol_version = version
+//                      ,early_data_state = early_data_state
+//                      ,chosen_psk_null = chosen_psk_null_bit
+//                      ,quic_enabled = quic_enabled_bit
+//                      }
+//                   }});
+// };
+
+// TODO RGS: This is all cargo-culted from s2n_handshake_io.cry
+// Perhaps we should just use that?
+
+let
+{{
+S2N_UNKNOWN_PROTOCOL_VERSION : [8]
+S2N_UNKNOWN_PROTOCOL_VERSION = 0
+
+S2N_TLS13 : [8]
+S2N_TLS13 = 34
+
+S2N_CLIENT : [32]
+S2N_CLIENT = 1
+}};
+
+// TODO RGS: This is all cargo-culted from handshake_io_lowlevel.saw
+// Perhaps we should just use that?
+
+//conn->mode
+let conn_mode pconn = llvm_field pconn "mode";
+
+let {{
+// Convert a Bit to a length-1 bitvector.
+bit_to_bv1 : Bit -> [1]
+bit_to_bv1 b = [b]
+
+// Convert a length-1 bitvector to a Bit.
+bv1_to_bit : [1] -> Bit
+bv1_to_bit bv1 = bv1 @ 0
+}};
+
+// s2n_crypto_constants.h
+
+let S2N_TLS_SEQUENCE_NUM_LEN = 8;
+let S2N_TLS_MAX_IV_LEN       = 16;
+
+// TODO RGS: These specs are taken directly from tests/saw/HMAC/spec/HMAC.saw and friends. Reuse them?
+
+let hmac_digest_size_spec
+      (cfg : { name            : String
+             , hmac_alg        : Term
+             , digest_size     : Int
+             , block_size      : Int
+             , hash_block_size : Int
+             }) = do {
+    psize <- llvm_alloc (llvm_int 8);
+    llvm_execute_func [llvm_term cfg.hmac_alg, psize];
+    let digest_size = cfg.digest_size;
+    llvm_points_to psize (llvm_term {{ `digest_size : [8] }});
+    llvm_return (llvm_term {{ 0 : [32] }});
+};
+
+let
+{{
+S2N_HMAC_NONE       = 0:[32]
+S2N_HMAC_MD5        = 1:[32]
+S2N_HMAC_SHA1       = 2:[32]
+S2N_HMAC_SHA224     = 3:[32]
+S2N_HMAC_SHA256     = 4:[32]
+S2N_HMAC_SHA384     = 5:[32]
+S2N_HMAC_SHA512     = 6:[32]
+S2N_HMAC_SSLv3_MD5  = 7:[32]
+S2N_HMAC_SSLv3_SHA1 = 8:[32]
+}};
+
+let none_cfg =
+  { name            = "NONE"
+  , hmac_alg        = {{ S2N_HMAC_NONE }}
+  , digest_size     = 0
+  , block_size      = 64
+  , hash_block_size = 64
+  };
+
+let md5_cfg =
+  { name            = "MD5"
+  , hmac_alg        = {{ S2N_HMAC_MD5 }}
+  , digest_size     = 16
+  , block_size      = 64
+  , hash_block_size = 64
+  };
+
+let sha1_cfg =
+  { name            = "SHA1"
+  , hmac_alg        = {{ S2N_HMAC_SHA1 }}
+  , digest_size     = 20
+  , block_size      = 64
+  , hash_block_size = 64
+  };
+
+let sha224_cfg =
+  { name            = "SHA224"
+  , hmac_alg        = {{ S2N_HMAC_SHA224 }}
+  , digest_size     = 28
+  , block_size      = 64
+  , hash_block_size = 64
+  };
+
+let sha256_cfg =
+  { name            = "SHA256"
+  , hmac_alg        = {{ S2N_HMAC_SHA256 }}
+  , digest_size     = 32
+  , block_size      = 64
+  , hash_block_size = 64
+  };
+
+let sha384_cfg =
+  { name            = "SHA384"
+  , hmac_alg        = {{ S2N_HMAC_SHA384 }}
+  , digest_size     = 48
+  , block_size      = 128
+  , hash_block_size = 128
+  };
+
+let sha512_cfg =
+  { name            = "SHA512"
+  , hmac_alg        = {{ S2N_HMAC_SHA512 }}
+  , digest_size     = 64
+  , block_size      = 128
+  , hash_block_size = 128
+  };
+
+// s2n_record_write.c
+
+let
+{{
+S2N_SUCCESS : [32]
+S2N_SUCCESS = 0
+
+S2N_FAILURE : [32]
+S2N_FAILURE = -1
+
+S2N_TLS_MAXIMUM_FRAGMENT_LENGTH : [16]
+S2N_TLS_MAXIMUM_FRAGMENT_LENGTH = (1 << 14)
+
+S2N_STREAM    = 0:[32]
+S2N_CBC       = 1:[32]
+S2N_AEAD      = 2:[32]
+S2N_COMPOSITE = 3:[32]
+
+S2N_TLS10 : [8]
+S2N_TLS10 = 31
+}};
+
+let S2N_RESULT_OK = llvm_term {{ S2N_SUCCESS }};
+let S2N_RESULT_ERROR = llvm_term {{ S2N_FAILURE }};
+
+let s2n_record_max_write_payload_size_spec = do {
+  pconn <- llvm_alloc_readonly (llvm_alias "struct.s2n_connection");
+  max_fragment_size <- llvm_alloc (llvm_int 16);
+
+  // pconn initialization
+  max_outgoing_fragment_length <- llvm_fresh_var "max_outgoing_fragment_length" (llvm_int 16);
+  llvm_points_to (llvm_field pconn "max_outgoing_fragment_length") (llvm_term max_outgoing_fragment_length);
+  llvm_precond {{ max_outgoing_fragment_length > 0 }};
+
+  // More pconn initialization
+  // TODO RGS: This is all cargo-culted from setup_connection_common.
+  // Perhaps we should just use that?
+  mode <- llvm_fresh_var "mode" (llvm_int 32);
+  llvm_points_to (conn_mode pconn) (llvm_term mode);
+
+  llvm_execute_func [pconn, max_fragment_size];
+
+  llvm_points_to max_fragment_size (llvm_term {{ min max_outgoing_fragment_length S2N_TLS_MAXIMUM_FRAGMENT_LENGTH }});
+
+  llvm_return S2N_RESULT_OK;
+};
+
+let s2n_tls_record_overhead_spec
+      (use_client : Bool)
+      (cfg : { name            : String
+             , hmac_alg        : Term
+             , digest_size     : Int
+             , block_size      : Int
+             , hash_block_size : Int
+             }) = do {
+  pconn <- llvm_alloc_readonly (llvm_alias "struct.s2n_connection");
+  pout <- llvm_alloc (llvm_int 16);
+
+  // pconn initialization
+  server <- llvm_alloc_readonly (llvm_alias "struct.s2n_crypto_parameters");
+  // client <- llvm_alloc_readonly (llvm_alias "struct.s2n_crypto_parameters");
+
+  // More pconn initialization
+  // TODO RGS: This is all cargo-culted from setup_connection_common.
+  // Perhaps we should just use that?
+  version <- llvm_fresh_var "version" (llvm_int 8);
+  // llvm_precond {{ version != S2N_UNKNOWN_PROTOCOL_VERSION /\ version <= S2N_TLS13 }};
+  llvm_points_to (llvm_field pconn "actual_protocol_version") (llvm_term version);
+
+  mode <- llvm_fresh_var "mode" (llvm_int 32);
+  llvm_points_to (conn_mode pconn) (llvm_term mode);
+
+  // Back to non-cargo-culted code
+  active <-
+    if use_client
+      then do { client <- llvm_alloc_readonly (llvm_alias "struct.s2n_crypto_parameters");
+                llvm_points_to (llvm_field pconn "client") client;
+                llvm_equal (llvm_term {{ mode }}) (llvm_term {{ S2N_CLIENT }});
+                return client;
+              }
+      else do { llvm_points_to (llvm_field pconn "server") server;
+                return server;
+              };
+  // llvm_conditional_points_to {{ mode != S2N_CLIENT }} (llvm_field pconn "server") server;
+  // llvm_conditional_points_to {{ mode == S2N_CLIENT }} (llvm_field pconn "client") client;
+
+  cipher_suite <- llvm_alloc_readonly (llvm_alias "struct.s2n_cipher_suite");
+  llvm_points_to (llvm_field active "cipher_suite") cipher_suite;
+  // llvm_conditional_points_to {{ mode != S2N_CLIENT }} (llvm_field server "cipher_suite") cipher_suite;
+  // llvm_conditional_points_to {{ mode == S2N_CLIENT }} (llvm_field client "cipher_suite") cipher_suite;
+
+  record_alg <- llvm_alloc_readonly (llvm_alias "struct.s2n_record_algorithm");
+  llvm_points_to (llvm_field cipher_suite "record_alg") record_alg;
+
+  llvm_points_to (llvm_field record_alg "hmac_alg") (llvm_term cfg.hmac_alg);
+
+  cipher <- llvm_alloc_readonly (llvm_alias "struct.s2n_cipher");
+  llvm_points_to (llvm_field record_alg "cipher") cipher;
+
+  // cipher initialization
+  cipher_type <- llvm_fresh_var "type" (llvm_int 32);
+  llvm_points_to (llvm_field cipher "type") (llvm_term cipher_type);
+
+  // TODO RGS: Sigh. Explain why this must be as ugly as it is.
+  record_iv_size <- llvm_fresh_var "record_iv_size" (llvm_int 8);
+  tag_size <- llvm_fresh_var "tag_size" (llvm_int 8);
+  let cbc_record_iv_size = record_iv_size;
+  let aead_record_iv_size = record_iv_size;
+  let aead_tag_size = tag_size;
+  let comp_record_iv_size = record_iv_size;
+  llvm_points_to (llvm_elem (llvm_cast_pointer (llvm_field cipher "io") (llvm_struct_type [llvm_int 8, llvm_int 8, llvm_int 8])) 1) (llvm_term record_iv_size);
+  llvm_points_to (llvm_elem (llvm_cast_pointer (llvm_field cipher "io") (llvm_struct_type [llvm_int 8, llvm_int 8, llvm_int 8])) 2) (llvm_term tag_size);
+
+  /*
+  cbc_record_iv_size <- llvm_fresh_var "cbc_record_iv_size" (llvm_int 8);
+  // llvm_points_to (llvm_field (llvm_union (llvm_field cipher "io") "cbc") "record_iv_size") (llvm_term cbc_record_iv_size);
+  // llvm_points_to (llvm_field (llvm_cast_pointer (llvm_field cipher "io") (llvm_alias "struct.s2n_cbc_cipher")) "record_iv_size") (llvm_term cbc_record_iv_size);
+  // TODO RGS: Ugh. This is an ugly workaround for https://github.com/GaloisInc/saw-script/issues/1291
+  llvm_points_to (llvm_elem (llvm_cast_pointer (llvm_field cipher "io") (llvm_struct_type [llvm_int 8, llvm_int 8])) 1) (llvm_term cbc_record_iv_size);
+
+  aead_tag_size <- llvm_fresh_var "aead_tag_size" (llvm_int 8);
+  // llvm_points_to (llvm_field (llvm_union (llvm_field cipher "io") "aead") "tag_size") (llvm_term aead_tag_size);
+  // llvm_points_to (llvm_field (llvm_cast_pointer (llvm_field cipher "io") (llvm_alias "struct.s2n_aead_cipher")) "tag_size") (llvm_term aead_tag_size);
+  // TODO RGS: Ugh. This is an ugly workaround for https://github.com/GaloisInc/saw-script/issues/1291
+  llvm_points_to (llvm_elem (llvm_cast_pointer (llvm_field cipher "io") (llvm_struct_type [llvm_int 8, llvm_int 8, llvm_int 8])) 2) (llvm_term aead_tag_size);
+  aead_record_iv_size <- llvm_fresh_var "aead_record_iv_size" (llvm_int 8);
+  // llvm_points_to (llvm_field (llvm_union (llvm_field cipher "io") "aead") "record_iv_size") (llvm_term aead_record_iv_size);
+  // llvm_points_to (llvm_field (llvm_cast_pointer (llvm_field cipher "io") (llvm_alias "struct.s2n_aead_cipher")) "record_iv_size") (llvm_term aead_record_iv_size);
+  // TODO RGS: Ugh. This is an ugly workaround for https://github.com/GaloisInc/saw-script/issues/1291
+  llvm_points_to (llvm_elem (llvm_cast_pointer (llvm_field cipher "io") (llvm_struct_type [llvm_int 8, llvm_int 8, llvm_int 8])) 1) (llvm_term aead_tag_size);
+
+  comp_record_iv_size <- llvm_fresh_var "comp_record_iv_size" (llvm_int 8);
+  // llvm_points_to (llvm_field (llvm_union (llvm_field cipher "io") "comp") "record_iv_size") (llvm_term comp_record_iv_size);
+  // llvm_points_to (llvm_field (llvm_cast_pointer (llvm_field cipher "io") (llvm_alias "struct.s2n_composite_cipher")) "record_iv_size") (llvm_term comp_record_iv_size);
+  // TODO RGS: Ugh. This is an ugly workaround for https://github.com/GaloisInc/saw-script/issues/1291
+  llvm_points_to (llvm_elem (llvm_cast_pointer (llvm_field cipher "io") (llvm_struct_type [llvm_int 8, llvm_int 8])) 1) (llvm_term comp_record_iv_size);
+  */
+
+  llvm_execute_func [pconn, pout];
+
+  let digest_size = cfg.digest_size;
+  let extra0 = {{ `digest_size : [8] }};
+  let extra1 = {{      if cipher_type == S2N_CBC then extra0 + 1 + (if version > S2N_TLS10 then cbc_record_iv_size else 0)
+                  else if cipher_type == S2N_AEAD then extra0 + aead_tag_size + aead_record_iv_size
+                  else if (cipher_type == S2N_COMPOSITE /\ version > S2N_TLS10) then extra0 + comp_record_iv_size
+                  else extra0 }};
+  llvm_points_to pout (llvm_term {{ zext extra1 : [16] }});
+
+  llvm_return S2N_RESULT_OK;
+};
+
+// let s2n_handshake_type_set_flag_spec = do {
+//   pconn <- llvm_alloc_readonly (llvm_alias "struct.s2n_connection");
+//   flag <- llvm_fresh_var "flag" (llvm_int 32);
+//
+//   // pconn initialization
+//   orig_handshake_type <- llvm_fresh_var "orig_handshake_type" (llvm_int 32);
+//   llvm_points_to (llvm_field (llvm_field pconn "handshake") "handshake_type") (llvm_term orig_handshake_type);
+//
+//   llvm_execute_func [pconn, llvm_term flag];
+//
+//   let new_handshake_type = {{ orig_handshake_type || flag }};
+//   llvm_points_to (llvm_field (llvm_field pconn "handshake") "handshake_type") (llvm_term new_handshake_type);
+//   llvm_return S2N_RESULT_OK;
+// };
+
+let
+{{
+s2n_handshake_type_check_flag : [32] -> [32] -> Bit
+s2n_handshake_type_check_flag handshake_type flag = (handshake_type && flag) != 0
+}};
+
+let s2n_handshake_type_check_flag_spec = do {
+  pconn <- llvm_alloc_readonly (llvm_alias "struct.s2n_connection");
+  flag <- llvm_fresh_var "flag" (llvm_int 32);
+
+  // pconn initialization
+  handshake_type <- llvm_fresh_var "handshake_type" (llvm_int 32);
+  llvm_points_to (llvm_field (llvm_field pconn "handshake") "handshake_type") (llvm_term handshake_type);
+
+  llvm_execute_func [pconn, llvm_term flag];
+
+  llvm_return (llvm_term {{ bit_to_bv1 (s2n_handshake_type_check_flag handshake_type flag) }});
+};
+
+let
+{{
+S2N_TLS_CONTENT_TYPE_LENGTH : [16]
+S2N_TLS_CONTENT_TYPE_LENGTH = 1
+
+S2N_TLS_PROTOCOL_VERSION_LEN : [16]
+S2N_TLS_PROTOCOL_VERSION_LEN = 2
+
+S2N_TLS_RECORD_HEADER_LENGTH : [16]
+S2N_TLS_RECORD_HEADER_LENGTH = S2N_TLS_CONTENT_TYPE_LENGTH + S2N_TLS_PROTOCOL_VERSION_LEN + 2
+
+S2N_TLS12_ENCRYPTION_OVERHEAD_SIZE : [16]
+S2N_TLS12_ENCRYPTION_OVERHEAD_SIZE = 1024
+
+S2N_TLS12_MAX_RECORD_LEN_FOR : [16] -> [16]
+S2N_TLS12_MAX_RECORD_LEN_FOR frag = frag + S2N_TLS12_ENCRYPTION_OVERHEAD_SIZE
+                                         + S2N_TLS_RECORD_HEADER_LENGTH
+
+S2N_TLS_MAX_RECORD_LEN_FOR : [16] -> [16]
+S2N_TLS_MAX_RECORD_LEN_FOR = S2N_TLS12_MAX_RECORD_LEN_FOR
+
+S2N_TLS13_ENCRYPTION_OVERHEAD_SIZE : [16]
+S2N_TLS13_ENCRYPTION_OVERHEAD_SIZE = 255
+
+S2N_TLS13_MAX_RECORD_LEN_FOR : [16] -> [16]
+S2N_TLS13_MAX_RECORD_LEN_FOR frag = frag + S2N_TLS_CONTENT_TYPE_LENGTH
+                                         + S2N_TLS13_ENCRYPTION_OVERHEAD_SIZE
+                                         + S2N_TLS_RECORD_HEADER_LENGTH
+
+INITIAL        = 0:[32]
+NEGOTIATED     = 1:[32]
+FULL_HANDSHAKE = 2:[32]
+CLIENT_AUTH    = 4:[32]
+NO_CLIENT_CERT = 8:[32]
+
+IS_NEGOTIATED : [32] -> Bit
+IS_NEGOTIATED handshake_type = s2n_handshake_type_check_flag handshake_type NEGOTIATED
+}};
+
+let s2n_record_max_write_size_spec = do {
+
+  pconn <- llvm_alloc_readonly (llvm_alias "struct.s2n_connection");
+  max_fragment_size <- llvm_fresh_var "max_fragment_size" (llvm_int 16);
+  max_record_size <- llvm_alloc (llvm_int 16);
+
+  // pconn initialization
+  handshake_type <- llvm_fresh_var "handshake_type" (llvm_int 32);
+  llvm_points_to (llvm_field (llvm_field pconn "handshake") "handshake_type") (llvm_term handshake_type);
+
+  // More pconn initialization
+  // TODO RGS: This is all cargo-culted from setup_connection_common.
+  // Perhaps we should just use that?
+  version <- llvm_fresh_var "version" (llvm_int 8);
+  // llvm_precond {{ version != S2N_UNKNOWN_PROTOCOL_VERSION /\ version <= S2N_TLS13 }};
+  llvm_points_to (llvm_field pconn "actual_protocol_version") (llvm_term version);
+
+  llvm_execute_func [pconn, llvm_term max_fragment_size, max_record_size];
+
+  let new_max_record_size =
+      {{      if ~(IS_NEGOTIATED handshake_type) then S2N_TLS_MAX_RECORD_LEN_FOR max_fragment_size
+         else if version < S2N_TLS13 then S2N_TLS12_MAX_RECORD_LEN_FOR max_fragment_size
+         else S2N_TLS13_MAX_RECORD_LEN_FOR max_fragment_size
+      }};
+  llvm_points_to max_record_size (llvm_term new_max_record_size);
+
+  llvm_return S2N_RESULT_OK;
+};
+
+// TODO: We assume that the `data` field is non-NULL, but the function itself doesn't assume this
+let s2n_blob_validate
+      (blob : SetupValue)
+      (data : SetupValue)
+      (size_int : Int)
+        : LLVMSetup (Term, Term) = do {
+  let size = {{ `(size_int) : [32] }};
+  allocated <- llvm_fresh_var "allocated" (llvm_int 32);
+  growable <- llvm_fresh_var "growable" (llvm_int 1);
+
+  llvm_points_to (llvm_field blob "size") (llvm_term size);
+  llvm_points_to (llvm_field blob "data") data;
+  llvm_points_to (llvm_field blob "allocated") (llvm_term allocated);
+  llvm_points_to_bitfield blob "growable" (llvm_term growable);
+
+  llvm_assert {{ (growable == 0) ==> (allocated == 0) }};
+  llvm_assert {{ (growable != 0) ==> (size <= allocated) }};
+
+  return (allocated, growable);
+};
+
+let s2n_blob_validate_spec (size_int : Int) = do {
+  b <- llvm_alloc_readonly (llvm_alias "struct.s2n_blob");
+  let size = {{ `(size_int) : [32] }};
+  data <- llvm_alloc_readonly (llvm_int (eval_int {{ 8 * size }}));
+  _ <- s2n_blob_validate b data size_int;
+
+  llvm_execute_func [b];
+
+  llvm_return S2N_RESULT_OK;
+};
+
+let s2n_stuffer_validate
+      (stuffer : SetupValue)
+      (blob_data : SetupValue)
+      (blob_size_int : Int)
+        : LLVMSetup (Term, Term, Term, Term, Term, Term) = do {
+  read_cursor <- llvm_fresh_var "read_cursor" (llvm_int 32);
+  write_cursor <- llvm_fresh_var "write_cursor" (llvm_int 32);
+  high_water_mark <- llvm_fresh_var "high_water_mark" (llvm_int 32);
+  stuffer_alloced <- llvm_fresh_var "stuffer_alloced" (llvm_int 1);
+  stuffer_growable <- llvm_fresh_var "stuffer_growable" (llvm_int 1);
+  stuffer_tainted <- llvm_fresh_var "stuffer_tainted" (llvm_int 1);
+
+  llvm_points_to (llvm_field stuffer "read_cursor") (llvm_term read_cursor);
+  llvm_points_to (llvm_field stuffer "write_cursor") (llvm_term write_cursor);
+  llvm_points_to (llvm_field stuffer "high_water_mark") (llvm_term high_water_mark);
+  llvm_points_to_bitfield stuffer "alloced" (llvm_term stuffer_alloced);
+  llvm_points_to_bitfield stuffer "growable" (llvm_term stuffer_growable);
+  llvm_points_to_bitfield stuffer "tainted" (llvm_term stuffer_tainted);
+
+  let blob_size = {{ `(blob_size_int) : [32] }};
+  _ <- s2n_blob_validate (llvm_field stuffer "blob") blob_data blob_size_int;
+
+  llvm_assert {{ (stuffer_growable != 0) ==> (stuffer_alloced != 0) }};
+  llvm_assert {{ high_water_mark <= blob_size }};
+  llvm_assert {{ write_cursor <= high_water_mark }};
+  llvm_assert {{ read_cursor <= write_cursor }};
+
+  return (read_cursor, write_cursor, high_water_mark, stuffer_alloced, stuffer_growable, stuffer_tainted);
+};
+
+let s2n_stuffer_validate_spec (blob_size_int : Int) = do {
+  stuffer <- llvm_alloc_readonly (llvm_alias "struct.s2n_stuffer");
+  let blob_size = {{ `(blob_size_int) : [32] }};
+  blob_data <- llvm_alloc_readonly (llvm_int (eval_int {{ 8 * blob_size }}));
+  _ <- s2n_stuffer_validate stuffer blob_data blob_size_int;
+
+  llvm_execute_func [stuffer];
+
+  llvm_return S2N_RESULT_OK;
+};
+
+let s2n_add_overflow_spec = do {
+  a <- llvm_fresh_var "a" (llvm_int 32);
+  b <- llvm_fresh_var "b" (llvm_int 32);
+  out <- llvm_alloc (llvm_int 32);
+
+  let result32 = {{ a + b }};
+  let result64 = {{ zext a + zext b : [64] }};
+  llvm_precond {{ result64 <= zext 0xffffffff }};
+
+  llvm_execute_func [llvm_term a, llvm_term b, out];
+
+  llvm_points_to out (llvm_term result32);
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+let
+{{
+s2n_stuffer_is_wiped : [32] -> Bit
+s2n_stuffer_is_wiped high_water_mark = high_water_mark == 0
+
+S2N_WIPE_PATTERN = 'w'
+}};
+
+let s2n_stuffer_wipe_spec (blob_size_int : Int) = do {
+  stuffer <- llvm_alloc (llvm_alias "struct.s2n_stuffer");
+  let blob_size = {{ `(blob_size_int) : [32] }};
+  blob_data <- llvm_alloc (llvm_int (eval_int {{ 8 * blob_size }}));
+  _ <- s2n_stuffer_validate stuffer blob_data blob_size_int;
+
+  llvm_execute_func [stuffer];
+
+  // TODO RGS: memset
+  // let blob_data_bytes_after_memset =
+  //       {{ ((repeat S2N_WIPE_PATTERN : [8 * high_water_mark]) # drop blob_data_bytes) : [`(blob_data_num_bytes)] }};
+  // llvm_points_to blob_data (llvm_term blob_data_bytes_after_memset);
+
+  (read_cursor, write_cursor, high_water_mark, _, _, tainted) <-
+    s2n_stuffer_validate stuffer blob_data blob_size_int;
+
+  llvm_equal (llvm_term tainted) (llvm_term {{ 0 : [1] }});
+  llvm_equal (llvm_term write_cursor) (llvm_term {{ 0 : [32] }});
+  llvm_equal (llvm_term read_cursor) (llvm_term {{ 0 : [32] }});
+  llvm_equal (llvm_term high_water_mark) (llvm_term {{ 0 : [32] }});
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+// TODO RGS: The size here isn't quite right, should be (max allocated size)
+let s2n_blob_zero (size_int : Int) = do {
+  b <- llvm_alloc (llvm_alias "struct.s2n_blob");
+  let size = {{ `(size_int) : [32] }};
+  data <- llvm_alloc (llvm_int (eval_int {{ 8 * size }}));
+  _ <- s2n_blob_validate b data size_int;
+
+  llvm_execute_func [b];
+
+  // TODO RGS: memset
+  _ <- s2n_blob_validate b data size_int;
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+// let s2n_free_spec = do {
+//   b <- llvm_alloc_readonly (llvm_alias "struct.s2n_blob");
+//   let size = {{ `(size_int) : [32] }};
+//   data <- llvm_alloc_readonly (llvm_int (eval_int {{ 8 * size }}));
+//   _ <- s2n_blob_validate b data size_int;
+//
+//   llvm_precond
+//
+//   llvm_execute_func [b];
+//
+//   llvm_return (llvm_term {{ S2N_SUCCESS }});
+// };
+
+// let s2n_stuffer_resize_spec = do {
+//
+// };
+
+// TODO RGS: Not complete
+let s2n_stuffer_reserve_space_spec = do {
+  stuffer <- llvm_alloc (llvm_alias "struct.s2n_stuffer");
+  n <- llvm_fresh_var "n" (llvm_int 32);
+
+  llvm_execute_func [stuffer, llvm_term n];
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+let s2n_stuffer_skip_write_spec (blob_size_int : Int) = do {
+  stuffer <- llvm_alloc (llvm_alias "struct.s2n_stuffer");
+  n <- llvm_fresh_var "n" (llvm_int 32);
+
+  let blob_size = {{ `(blob_size_int) : [32] }};
+  blob_data <- llvm_alloc (llvm_int (eval_int {{ 8 * blob_size }}));
+  (_, write_cursor, high_water_mark, _, _, _) <-
+    s2n_stuffer_validate stuffer blob_data blob_size_int;
+
+  llvm_execute_func [stuffer, llvm_term n];
+
+  llvm_points_to (llvm_field stuffer "write_cursor") (llvm_term {{ write_cursor + n }});
+  llvm_points_to (llvm_field stuffer "high_water_mark") (llvm_term {{ max write_cursor high_water_mark }});
+  _ <- s2n_stuffer_validate stuffer blob_data blob_size_int;
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+// TODO RGS: Not complete
+let s2n_stuffer_write_bytes_spec = do {
+  stuffer <- llvm_alloc (llvm_alias "struct.s2n_stuffer");
+  data <- llvm_alloc_readonly (llvm_int 8);
+  size <- llvm_fresh_var "size" (llvm_int 32);
+
+  llvm_execute_func [stuffer, data, llvm_term size];
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+// TODO RGS: Not complete
+let s2n_stuffer_writev_bytes_spec = do {
+  stuffer <- llvm_alloc (llvm_alias "struct.s2n_stuffer");
+  iov <- llvm_alloc_readonly (llvm_alias "struct.iovec");
+  iov_count <- llvm_fresh_var "iov_count" (llvm_int 64);
+  offs <- llvm_fresh_var "offs" (llvm_int 32);
+  size <- llvm_fresh_var "size" (llvm_int 32);
+
+  llvm_execute_func [stuffer, iov, llvm_term iov_count, llvm_term offs, llvm_term size];
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+// TODO RGS: Not complete
+let s2n_stuffer_write_network_order_spec = do {
+  stuffer <- llvm_alloc (llvm_alias "struct.s2n_stuffer");
+  input <- llvm_fresh_var "input" (llvm_int 64);
+  length <- llvm_fresh_var "length" (llvm_int 8);
+
+  llvm_execute_func [stuffer, llvm_term input, llvm_term length];
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+let s2n_stuffer_write_uint8_spec = do {
+  stuffer <- llvm_alloc (llvm_alias "struct.s2n_stuffer");
+  u <- llvm_fresh_var "u" (llvm_int 8);
+
+  llvm_execute_func [stuffer, llvm_term u];
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+let s2n_stuffer_write_uint16_spec = do {
+  stuffer <- llvm_alloc (llvm_alias "struct.s2n_stuffer");
+  u <- llvm_fresh_var "u" (llvm_int 16);
+
+  llvm_execute_func [stuffer, llvm_term u];
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+/*
+let s2n_record_writev_spec = do {
+  pconn <- llvm_alloc (llvm_alias "struct.s2n_connection");
+  content_type <- llvm_fresh_var "content_type" (llvm_int 8);
+  pin <- llvm_alloc_readonly (llvm_alias "struct.iovec");
+  in_count <- llvm_fresh_var "in_count" (llvm_int 32);
+  offs <- llvm_fresh_var "offs" (llvm_int 64);
+  to_write <- llvm_fresh_var "to_write" (llvm_int 64);
+
+  // global variable initialization
+  llvm_alloc_global "s2n_null_cipher";
+  llvm_points_to (llvm_global "s2n_null_cipher") (llvm_global_initializer "s2n_null_cipher");
+
+  // TODO RGS: Delete this
+  // llvm_alloc_global "s2n_debug_str";
+  // llvm_alloc_global "s2n_errno";
+
+  // pconn initialization
+  client <- llvm_alloc (llvm_alias "struct.s2n_crypto_parameters");
+  llvm_points_to (llvm_field pconn "client") client;
+
+  server <- llvm_alloc (llvm_alias "struct.s2n_crypto_parameters");
+  llvm_points_to (llvm_field pconn "server") server;
+
+  initial <- llvm_fresh_var "initial" (llvm_alias "struct.s2n_crypto_parameters");
+  llvm_points_to (llvm_field pconn "initial") (llvm_term initial);
+
+  max_outgoing_fragment_length <- llvm_fresh_var "max_outgoing_fragment_length" (llvm_int 16);
+  llvm_points_to (llvm_field pconn "max_outgoing_fragment_length") (llvm_term max_outgoing_fragment_length);
+  llvm_precond {{ max_outgoing_fragment_length > 0 }};
+
+  // TODO RGS: Delete me
+  // out <- llvm_fresh_var "out" (llvm_alias "struct.s2n_stuffer");
+  // llvm_points_to (llvm_field pconn "out") (llvm_term out);
+
+  // server initialization
+  server_sequence_number <- llvm_fresh_var "server_sequence_number" (llvm_array S2N_TLS_SEQUENCE_NUM_LEN (llvm_int 8));
+  llvm_points_to (llvm_field server "server_sequence_number") (llvm_term server_sequence_number);
+
+  server_record_mac <- llvm_fresh_var "server_record_mac" (llvm_alias "struct.s2n_hmac_state");
+  llvm_points_to (llvm_field server "server_record_mac") (llvm_term server_record_mac);
+
+  server_key <- llvm_fresh_var "server_key" (llvm_alias "struct.s2n_session_key");
+  llvm_points_to (llvm_field server "server_key") (llvm_term server_key);
+
+  server_cipher_suite <- llvm_alloc (llvm_alias "struct.s2n_cipher_suite");
+  llvm_points_to (llvm_field server "cipher_suite") server_cipher_suite;
+
+  server_implicit_iv <- llvm_fresh_var "server_implicit_iv" (llvm_array S2N_TLS_MAX_IV_LEN (llvm_int 8));
+  llvm_points_to (llvm_field server "server_implicit_iv") (llvm_term server_implicit_iv);
+
+  // client initialization
+  // TODO RGS: Deduplicate this with server initialization
+  client_sequence_number <- llvm_fresh_var "client_sequence_number" (llvm_array S2N_TLS_SEQUENCE_NUM_LEN (llvm_int 8));
+  llvm_points_to (llvm_field client "client_sequence_number") (llvm_term client_sequence_number);
+
+  client_record_mac <- llvm_fresh_var "client_record_mac" (llvm_alias "struct.s2n_hmac_state");
+  llvm_points_to (llvm_field client "client_record_mac") (llvm_term client_record_mac);
+
+  client_key <- llvm_fresh_var "client_key" (llvm_alias "struct.s2n_session_key");
+  llvm_points_to (llvm_field client "client_key") (llvm_term client_key);
+
+  client_cipher_suite <- llvm_alloc (llvm_alias "struct.s2n_cipher_suite");
+  llvm_points_to (llvm_field client "cipher_suite") client_cipher_suite;
+
+  client_implicit_iv <- llvm_fresh_var "client_implicit_iv" (llvm_array S2N_TLS_MAX_IV_LEN (llvm_int 8));
+  llvm_points_to (llvm_field client "client_implicit_iv") (llvm_term client_implicit_iv);
+
+  // server cipher_suite initialization
+  server_record_alg <- llvm_alloc_readonly (llvm_alias "struct.s2n_record_algorithm");
+  llvm_points_to (llvm_field server_cipher_suite "record_alg") server_record_alg;
+
+  // client cipher_suite initialization
+  client_record_alg <- llvm_alloc_readonly (llvm_alias "struct.s2n_record_algorithm");
+  llvm_points_to (llvm_field client_cipher_suite "record_alg") client_record_alg;
+
+  // server record_alg initialization
+  server_cipher <- llvm_alloc_readonly (llvm_alias "struct.s2n_record_algorithm");
+  llvm_points_to (llvm_field server_record_alg "cipher") server_cipher;
+
+  server_flags <- llvm_fresh_var "server_flags" (llvm_int 32);
+  llvm_points_to (llvm_field server_record_alg "flags") (llvm_term server_flags);
+
+  // client record_alg initialization
+  client_cipher <- llvm_alloc_readonly (llvm_alias "struct.s2n_record_algorithm");
+  llvm_points_to (llvm_field client_record_alg "cipher") client_cipher;
+
+  client_flags <- llvm_fresh_var "client_flags" (llvm_int 32);
+  llvm_points_to (llvm_field client_record_alg "flags") (llvm_term client_flags);
+
+  // stuffer initialization
+  write_cursor <- llvm_fresh_var "write_cursor" (llvm_int 32);
+  llvm_points_to (llvm_field (llvm_field pconn "out") "write_cursor") (llvm_term write_cursor);
+
+  read_cursor <- llvm_fresh_var "read_cursor" (llvm_int 32);
+  llvm_points_to (llvm_field (llvm_field pconn "out") "read_cursor") (llvm_term read_cursor);
+
+  llvm_equal (llvm_term {{ write_cursor - read_cursor }}) (llvm_term {{ 0 : [32] }});
+
+  // More pconn initialization
+  // TODO RGS: This is all cargo-culted from setup_connection_common.
+  // Perhaps we should just use that?
+  version <- llvm_fresh_var "version" (llvm_int 8);
+  llvm_precond {{ version != S2N_UNKNOWN_PROTOCOL_VERSION /\ version <= S2N_TLS13 }};
+  llvm_points_to (llvm_field pconn "actual_protocol_version") (llvm_term version);
+
+  mode <- llvm_fresh_var "mode" (llvm_int 32);
+  llvm_points_to (conn_mode pconn) (llvm_term mode);
+
+  llvm_execute_func [ pconn
+                    , llvm_term content_type
+                    , pin
+                    , llvm_term in_count
+                    , llvm_term offs
+                    , llvm_term to_write
+                    ];
+
+  // TODO RGS: Make this more precise. It should be at least 0, if nothing else.
+  data_bytes_to_take <- llvm_fresh_var "data_bytes_to_take" (llvm_int 32);
+  llvm_return (llvm_term data_bytes_to_take);
+};
+*/
+
+llvm <- llvm_load_module "bitcode/all_llvm.bc";
+
+let cfg = sha1_cfg; // TODO RGS: Try others
+let use_client = true; // TODO RGS: Think about this some more
+
+print "Proving s2n_record_writev memory safety...";
+
+// hmac_digest_size_ov <- llvm_unsafe_assume_spec llvm "s2n_hmac_digest_size" (hmac_digest_size_spec cfg);
+// record_max_write_payload_size_ov <- llvm_verify llvm "s2n_record_max_write_payload_size" [] false s2n_record_max_write_payload_size_spec (w4_unint_yices []);
+// tls_record_overhead_ov <- llvm_verify llvm "s2n_tls_record_overhead" [hmac_digest_size_ov] false (s2n_tls_record_overhead_spec use_client cfg) (w4_unint_yices []);
+// handshake_type_check_flag_ov <- llvm_verify llvm "s2n_handshake_type_check_flag" [] false s2n_handshake_type_check_flag_spec (w4_unint_yices []);
+// record_max_write_size_ov <- llvm_verify llvm "s2n_record_max_write_size" [handshake_type_check_flag_ov] false s2n_record_max_write_size_spec (w4_unint_yices []);
+blob_validate_ov <- llvm_verify llvm "s2n_blob_validate" [] false (s2n_blob_validate_spec S2N_TLS_SEQUENCE_NUM_LEN) (w4_unint_yices []);
+stuffer_validate_ov <- llvm_verify llvm "s2n_stuffer_validate" [blob_validate_ov] false (s2n_stuffer_validate_spec S2N_TLS_SEQUENCE_NUM_LEN) (w4_unint_yices []);
+// add_overflow_spec_ov <- llvm_verify llvm "s2n_add_overflow" [] false s2n_add_overflow_spec (w4_unint_yices []);
+// stuffer_wipe_spec_ov <- llvm_verify llvm "s2n_stuffer_wipe" [stuffer_validate_ov] false (s2n_stuffer_wipe_spec S2N_TLS_SEQUENCE_NUM_LEN) (w4_unint_yices []);
+// blob_zero_ov <- llvm_verify llvm "s2n_blob_zero" [blob_validate_ov] false (s2n_blob_zero S2N_TLS_SEQUENCE_NUM_LEN) (w4_unint_yices []);
+stuffer_reserve_space_ov <- llvm_unsafe_assume_spec llvm "s2n_stuffer_reserve_space" s2n_stuffer_reserve_space_spec;
+stuffer_write_bytes_ov <- llvm_unsafe_assume_spec llvm "s2n_stuffer_write_bytes" s2n_stuffer_write_bytes_spec;
+stuffer_writev_bytes_ov <- llvm_unsafe_assume_spec llvm "s2n_stuffer_writev_bytes" s2n_stuffer_writev_bytes_spec;
+stuffer_write_network_order_ov <- llvm_unsafe_assume_spec llvm "s2n_stuffer_write_network_order" s2n_stuffer_write_network_order_spec;
+stuffer_write_uint8_ov <- llvm_verify llvm "s2n_stuffer_write_uint8" [stuffer_write_bytes_ov] false s2n_stuffer_write_uint8_spec (w4_unint_yices []);
+stuffer_write_uint16_ov <- llvm_verify llvm "s2n_stuffer_write_uint16" [stuffer_write_network_order_ov] false s2n_stuffer_write_uint16_spec (w4_unint_yices []);
+// stuffer_skip_write <- llvm_verify llvm "s2n_stuffer_skip_write" [stuffer_validate_ov, stuffer_reserve_space_ov] false (s2n_stuffer_skip_write_spec S2N_TLS_SEQUENCE_NUM_LEN) (w4_unint_yices []);
+// stuffer_skip_write <- llvm_verify llvm "s2n_stuffer_skip_write" [stuffer_reserve_space_ov] false (s2n_stuffer_skip_write_spec S2N_TLS_SEQUENCE_NUM_LEN) (w4_unint_yices []);
+
+// let record_writev_ovs = [ hmac_digest_size_ov
+//                         , record_max_write_payload_size_ov
+//                         , stuffer_write_bytes_ov
+//                         , stuffer_writev_bytes_ov
+//                         , stuffer_write_uint8_ov
+//                         , stuffer_write_uint16_ov
+//                         ]
+// llvm_verify llvm "s2n_record_writev" record_writev_ovs false s2n_record_writev_spec (w4_unint_yices []);
+
+print "Proofs complete!";

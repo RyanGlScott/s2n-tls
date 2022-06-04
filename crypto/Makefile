@@ -18,7 +18,8 @@ OBJS=$(SRCS:.c=.o)
 
 BITCODE_DIR?=../tests/saw/bitcode/
 
-BCS_1= s2n_hash.bc s2n_hmac.bc s2n_drbg.bc s2n_fips.bc s2n_sequence.bc s2n_libcrypto.bc
+BCS_1= s2n_hash.bc s2n_hmac.bc s2n_drbg.bc s2n_fips.bc s2n_sequence.bc s2n_libcrypto.bc \
+	s2n_stream_cipher_null.bc
 BCS=$(addprefix $(BITCODE_DIR), $(BCS_1))
 
 .PHONY : all

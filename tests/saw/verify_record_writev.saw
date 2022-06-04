@@ -1,0 +1,606 @@
+enable_experimental;
+enable_lax_loads_and_stores;
+
+import "record_writev/s2n_record_writev.cry";
+
+// TODO RGS: This is all cargo-culted from s2n_handshake_io.cry
+// Perhaps we should just use that?
+
+let
+{{
+S2N_UNKNOWN_PROTOCOL_VERSION : [8]
+S2N_UNKNOWN_PROTOCOL_VERSION = 0
+
+S2N_TLS13 : [8]
+S2N_TLS13 = 34
+
+S2N_CLIENT : [32]
+S2N_CLIENT = 1
+}};
+
+// TODO RGS: This is all cargo-culted from handshake_io_lowlevel.saw
+// Perhaps we should just use that?
+
+//conn->mode
+let conn_mode pconn = llvm_field pconn "mode";
+
+let {{
+// Convert a Bit to a length-1 bitvector.
+bit_to_bv1 : Bit -> [1]
+bit_to_bv1 b = [b]
+
+// Convert a length-1 bitvector to a Bit.
+bv1_to_bit : [1] -> Bit
+bv1_to_bit bv1 = bv1 @ 0
+}};
+
+// s2n_crypto_constants.h
+
+let S2N_TLS_SEQUENCE_NUM_LEN = 8;
+let S2N_TLS_MAX_IV_LEN       = 16;
+
+// TODO RGS: These specs are taken directly from tests/saw/HMAC/spec/HMAC.saw and friends. Reuse them?
+
+let hmac_digest_size_spec
+      (cfg : { name            : String
+             , hmac_alg        : Term
+             , digest_size     : Int
+             , block_size      : Int
+             , hash_block_size : Int
+             }) = do {
+    psize <- llvm_alloc (llvm_int 8);
+    llvm_execute_func [llvm_term cfg.hmac_alg, psize];
+    let digest_size = cfg.digest_size;
+    llvm_points_to psize (llvm_term {{ `digest_size : [8] }});
+    llvm_return (llvm_term {{ 0 : [32] }});
+};
+
+let
+{{
+S2N_HMAC_NONE       = 0:[32]
+S2N_HMAC_MD5        = 1:[32]
+S2N_HMAC_SHA1       = 2:[32]
+S2N_HMAC_SHA224     = 3:[32]
+S2N_HMAC_SHA256     = 4:[32]
+S2N_HMAC_SHA384     = 5:[32]
+S2N_HMAC_SHA512     = 6:[32]
+S2N_HMAC_SSLv3_MD5  = 7:[32]
+S2N_HMAC_SSLv3_SHA1 = 8:[32]
+}};
+
+let none_cfg =
+  { name            = "NONE"
+  , hmac_alg        = {{ S2N_HMAC_NONE }}
+  , digest_size     = 0
+  , block_size      = 64
+  , hash_block_size = 64
+  };
+
+let md5_cfg =
+  { name            = "MD5"
+  , hmac_alg        = {{ S2N_HMAC_MD5 }}
+  , digest_size     = 16
+  , block_size      = 64
+  , hash_block_size = 64
+  };
+
+let sha1_cfg =
+  { name            = "SHA1"
+  , hmac_alg        = {{ S2N_HMAC_SHA1 }}
+  , digest_size     = 20
+  , block_size      = 64
+  , hash_block_size = 64
+  };
+
+let sha224_cfg =
+  { name            = "SHA224"
+  , hmac_alg        = {{ S2N_HMAC_SHA224 }}
+  , digest_size     = 28
+  , block_size      = 64
+  , hash_block_size = 64
+  };
+
+let sha256_cfg =
+  { name            = "SHA256"
+  , hmac_alg        = {{ S2N_HMAC_SHA256 }}
+  , digest_size     = 32
+  , block_size      = 64
+  , hash_block_size = 64
+  };
+
+let sha384_cfg =
+  { name            = "SHA384"
+  , hmac_alg        = {{ S2N_HMAC_SHA384 }}
+  , digest_size     = 48
+  , block_size      = 128
+  , hash_block_size = 128
+  };
+
+let sha512_cfg =
+  { name            = "SHA512"
+  , hmac_alg        = {{ S2N_HMAC_SHA512 }}
+  , digest_size     = 64
+  , block_size      = 128
+  , hash_block_size = 128
+  };
+
+// s2n_record_write.c
+
+let
+{{
+S2N_SUCCESS : [32]
+S2N_SUCCESS = 0
+
+S2N_FAILURE : [32]
+S2N_FAILURE = -1
+
+S2N_TLS_MAXIMUM_FRAGMENT_LENGTH : [16]
+S2N_TLS_MAXIMUM_FRAGMENT_LENGTH = (1 << 14)
+
+S2N_STREAM    = 0:[32]
+S2N_CBC       = 1:[32]
+S2N_AEAD      = 2:[32]
+S2N_COMPOSITE = 3:[32]
+
+S2N_TLS10 : [8]
+S2N_TLS10 = 31
+}};
+
+let S2N_RESULT_OK = llvm_term {{ S2N_SUCCESS }};
+let S2N_RESULT_ERROR = llvm_term {{ S2N_FAILURE }};
+
+let s2n_mem_init_assert = do {
+  llvm_alloc_global "initialized";
+  llvm_equal (llvm_global "initialized") (llvm_term {{ 1 : [1] }});
+};
+
+let s2n_record_max_write_payload_size_spec = do {
+  pconn <- llvm_alloc_readonly (llvm_alias "struct.s2n_connection");
+  max_fragment_size <- llvm_alloc (llvm_int 16);
+
+  // pconn initialization
+  max_outgoing_fragment_length <- llvm_fresh_var "max_outgoing_fragment_length" (llvm_int 16);
+  llvm_points_to (llvm_field pconn "max_outgoing_fragment_length") (llvm_term max_outgoing_fragment_length);
+  llvm_assert {{ max_outgoing_fragment_length > 0 }};
+
+  // More pconn initialization
+  // TODO RGS: This is all cargo-culted from setup_connection_common.
+  // Perhaps we should just use that?
+  mode <- llvm_fresh_var "mode" (llvm_int 32);
+  llvm_points_to (conn_mode pconn) (llvm_term mode);
+
+  llvm_execute_func [pconn, max_fragment_size];
+
+  llvm_points_to max_fragment_size (llvm_term {{ min max_outgoing_fragment_length S2N_TLS_MAXIMUM_FRAGMENT_LENGTH }});
+
+  llvm_return S2N_RESULT_OK;
+};
+
+// s2n_blob_validate
+
+let s2n_blob_alloc_common
+      (blob : SetupValue)
+      (blob_data : SetupValue)
+      (blob_size : Term)
+        : LLVMSetup Term = do {
+  blob_allocated <- llvm_fresh_var "allocated" (llvm_int 32);
+  blob_growable <- llvm_fresh_var "growable" (llvm_int 1);
+
+  llvm_points_to (llvm_field blob "size") (llvm_term blob_size);
+  llvm_points_to (llvm_field blob "data") blob_data;
+  llvm_points_to (llvm_field blob "allocated") (llvm_term blob_allocated);
+  llvm_points_to_bitfield blob "growable" (llvm_term blob_growable);
+
+  return {{ { size = blob_size
+            , allocated = blob_allocated
+            , growable = blob_growable
+            }
+         }};
+};
+
+let s2n_blob_alloc
+      (blob_size : Term)
+        : LLVMSetup (SetupValue, Term) = do {
+  blob <- llvm_alloc (llvm_alias "struct.s2n_blob");
+  blob_data <- llvm_alloc (llvm_int (eval_int {{ 8 * blob_size }}));
+  blob_term <- s2n_blob_alloc_common blob blob_data blob_size;
+  return (blob, blob_term);
+};
+
+let s2n_blob_alloc_readonly
+      (blob_size : Term)
+        : LLVMSetup (SetupValue, Term) = do {
+  blob <- llvm_alloc_readonly (llvm_alias "struct.s2n_blob");
+  blob_data <- llvm_alloc_readonly (llvm_int (eval_int {{ 8 * blob_size }}));
+  blob_term <- s2n_blob_alloc_common blob blob_data blob_size;
+  return (blob, blob_term);
+};
+
+// TODO: We assume that the `data` field is non-NULL, but the function itself doesn't assume this
+let s2n_blob_validate_assert (blob : Term) = do {
+  llvm_assert {{ (blob.growable == 0) ==> (blob.allocated == 0) }};
+  llvm_assert {{ (blob.growable != 0) ==> (blob.size <= blob.allocated) }};
+};
+
+let s2n_blob_validate_spec (blob_size_int : Int) = do {
+  let blob_size = {{ `(blob_size_int) : [32] }};
+  (blob, blob_term) <- s2n_blob_alloc_readonly blob_size;
+  s2n_blob_validate_assert blob_term;
+
+  llvm_execute_func [blob];
+
+  llvm_return S2N_RESULT_OK;
+};
+
+let s2n_blob_init_spec (blob_size_int : Int) = do {
+  blob <- llvm_alloc (llvm_alias "struct.s2n_blob");
+  let blob_size = {{ `(blob_size_int) : [32] }};
+  blob_data <- llvm_alloc_readonly (llvm_int (eval_int {{ 8 * blob_size }}));
+
+  llvm_execute_func [blob, blob_data, llvm_term blob_size];
+
+  let blob_allocated = {{ 0 : [32] }};
+  let blob_growable = {{ 0 : [1] }};
+  let blob_term = {{ { size = blob_size
+                     , allocated = blob_allocated
+                     , growable = blob_growable
+                     }
+                  }};
+
+  llvm_points_to (llvm_field blob "size") (llvm_term blob_size);
+  llvm_points_to (llvm_field blob "data") blob_data;
+  llvm_points_to (llvm_field blob "allocated") (llvm_term blob_allocated);
+  llvm_points_to_bitfield blob "growable" (llvm_term blob_growable);
+  s2n_blob_validate_assert blob_term;
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+// TODO RGS: Not complete
+let s2n_realloc_spec
+      (old_blob_size_int : Int)
+      (new_blob_size_int : Int) = do {
+  let old_blob_size = {{ `(old_blob_size_int) : [32] }};
+  let new_blob_size = {{ `(new_blob_size_int) : [32] }};
+  (blob, blob_term) <- s2n_blob_alloc old_blob_size;
+
+  llvm_assert {{ s2n_blob_is_growable blob_term }};
+  // TODO RGS: We could enable this, but it would probably be annoying to propagate.
+  // s2n_mem_init_assert;
+
+  llvm_execute_func [blob, llvm_term new_blob_size];
+
+  llvm_points_to (llvm_field blob "size") (llvm_term new_blob_size);
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+// TODO RGS: Not complete
+let s2n_free_spec (blob_size_int : Int) = do {
+  let blob_size = {{ `(blob_size_int) : [32] }};
+  (blob, blob_term) <- s2n_blob_alloc blob_size;
+
+  s2n_blob_validate_assert blob_term;
+  llvm_assert {{ s2n_blob_is_growable blob_term }};
+  // TODO RGS: We could enable this, but it would probably be annoying to propagate.
+  // s2n_mem_init_assert;
+
+  llvm_execute_func [blob];
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+// s2n_stuffer_validate
+
+let s2n_stuffer_alloc_common
+      (stuffer : SetupValue)
+      (blob : SetupValue)
+      (blob_data : SetupValue)
+      (blob_size : Term)
+        : LLVMSetup Term = do {
+  stuffer_read_cursor <- llvm_fresh_var "stuffer_read_cursor" (llvm_int 32);
+  stuffer_write_cursor <- llvm_fresh_var "stuffer_write_cursor" (llvm_int 32);
+  stuffer_high_water_mark <- llvm_fresh_var "stuffer_high_water_mark" (llvm_int 32);
+  stuffer_alloced <- llvm_fresh_var "stuffer_alloced" (llvm_int 1);
+  stuffer_growable <- llvm_fresh_var "stuffer_growable" (llvm_int 1);
+  stuffer_tainted <- llvm_fresh_var "stuffer_tainted" (llvm_int 1);
+
+  llvm_points_to (llvm_field stuffer "read_cursor") (llvm_term stuffer_read_cursor);
+  llvm_points_to (llvm_field stuffer "write_cursor") (llvm_term stuffer_write_cursor);
+  llvm_points_to (llvm_field stuffer "high_water_mark") (llvm_term stuffer_high_water_mark);
+  llvm_points_to_bitfield stuffer "alloced" (llvm_term stuffer_alloced);
+  llvm_points_to_bitfield stuffer "growable" (llvm_term stuffer_growable);
+  llvm_points_to_bitfield stuffer "tainted" (llvm_term stuffer_tainted);
+
+  blob_term <- s2n_blob_alloc_common blob blob_data blob_size;
+
+  return {{ { blob = blob_term
+            , read_cursor = stuffer_read_cursor
+            , write_cursor = stuffer_write_cursor
+            , high_water_mark = stuffer_high_water_mark
+            , alloced = stuffer_alloced
+            , growable = stuffer_growable
+            , tainted = stuffer_tainted
+            }
+         }};
+};
+
+let s2n_stuffer_alloc
+      (blob_size : Term)
+        : LLVMSetup (SetupValue, Term) = do {
+  stuffer <- llvm_alloc (llvm_alias "struct.s2n_stuffer");
+  blob_data <- llvm_alloc (llvm_int (eval_int {{ 8 * blob_size }}));
+  stuffer_term <- s2n_stuffer_alloc_common stuffer (llvm_field stuffer "blob") blob_data blob_size;
+  return (stuffer, stuffer_term);
+};
+
+let s2n_stuffer_alloc_readonly
+      (blob_size : Term)
+        : LLVMSetup (SetupValue, Term) = do {
+  stuffer <- llvm_alloc_readonly (llvm_alias "struct.s2n_stuffer");
+  blob_data <- llvm_alloc_readonly (llvm_int (eval_int {{ 8 * blob_size }}));
+  stuffer_term <- s2n_stuffer_alloc_common stuffer (llvm_field stuffer "blob") blob_data blob_size;
+  return (stuffer, stuffer_term);
+};
+
+let s2n_stuffer_validate_assert (stuffer : Term) = do {
+  s2n_blob_validate_assert {{ stuffer.blob }};
+  llvm_assert {{ (stuffer.growable != 0) ==> (stuffer.alloced != 0) }};
+  llvm_assert {{ stuffer.high_water_mark <= stuffer.blob.size }};
+  llvm_assert {{ stuffer.write_cursor <= stuffer.high_water_mark }};
+  llvm_assert {{ stuffer.read_cursor <= stuffer.write_cursor }};
+};
+
+let s2n_stuffer_validate_spec (blob_size_int : Int) = do {
+  let blob_size = {{ `(blob_size_int) : [32] }};
+  (stuffer, stuffer_term) <- s2n_stuffer_alloc_readonly blob_size;
+  s2n_stuffer_validate_assert stuffer_term;
+
+  llvm_execute_func [stuffer];
+
+  llvm_return S2N_RESULT_OK;
+};
+
+let s2n_stuffer_init_spec (blob_size_int : Int) = do {
+  let blob_size = {{ `(blob_size_int) : [32] }};
+  (blob, blob_term) <- s2n_blob_alloc_readonly blob_size;
+  stuffer <- llvm_alloc (llvm_alias "struct.s2n_stuffer");
+
+  s2n_blob_validate_assert blob_term;
+
+  llvm_execute_func [stuffer, blob];
+
+  let stuffer_read_cursor = {{ 0 : [32] }};
+  let stuffer_write_cursor = {{ 0 : [32] }};
+  let stuffer_high_water_mark = {{ 0 : [32] }};
+  let stuffer_alloced = {{ 0 : [1] }};
+  let stuffer_growable = {{ 0 : [1] }};
+  let stuffer_tainted = {{ 0 : [1] }};
+  let stuffer_term = {{ { blob = blob_term
+                        , read_cursor = stuffer_read_cursor
+                        , write_cursor = stuffer_write_cursor
+                        , high_water_mark = stuffer_high_water_mark
+                        , alloced = stuffer_alloced
+                        , growable = stuffer_growable
+                        , tainted = stuffer_tainted
+                        }
+                     }};
+
+  llvm_points_to (llvm_field stuffer "read_cursor") (llvm_term stuffer_read_cursor);
+  llvm_points_to (llvm_field stuffer "write_cursor") (llvm_term stuffer_write_cursor);
+  llvm_points_to (llvm_field stuffer "high_water_mark") (llvm_term stuffer_high_water_mark);
+  llvm_points_to_bitfield stuffer "alloced" (llvm_term stuffer_alloced);
+  llvm_points_to_bitfield stuffer "growable" (llvm_term stuffer_growable);
+  llvm_points_to_bitfield stuffer "tainted" (llvm_term stuffer_tainted);
+  s2n_stuffer_validate_assert stuffer_term;
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+let s2n_add_overflow_spec = do {
+  a <- llvm_fresh_var "a" (llvm_int 32);
+  b <- llvm_fresh_var "b" (llvm_int 32);
+  out <- llvm_alloc (llvm_int 32);
+
+  let result32 = {{ a + b }};
+  let result64 = {{ zext a + zext b : [64] }};
+  llvm_assert {{ result64 <= zext 0xffffffff }};
+
+  llvm_execute_func [llvm_term a, llvm_term b, out];
+
+  llvm_points_to out (llvm_term result32);
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+// TODO RGS: Not complete
+let s2n_stuffer_reserve_space_spec = do {
+  stuffer <- llvm_alloc (llvm_alias "struct.s2n_stuffer");
+  n <- llvm_fresh_var "n" (llvm_int 32);
+
+  llvm_execute_func [stuffer, llvm_term n];
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+// TODO RGS: Not complete
+let s2n_stuffer_write_bytes_spec = do {
+  stuffer <- llvm_alloc (llvm_alias "struct.s2n_stuffer");
+  data <- llvm_alloc_readonly (llvm_int 8);
+  size <- llvm_fresh_var "size" (llvm_int 32);
+
+  llvm_execute_func [stuffer, data, llvm_term size];
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+// TODO RGS: Not complete
+let s2n_stuffer_writev_bytes_spec = do {
+  stuffer <- llvm_alloc (llvm_alias "struct.s2n_stuffer");
+  iov <- llvm_alloc_readonly (llvm_alias "struct.iovec");
+  iov_count <- llvm_fresh_var "iov_count" (llvm_int 64);
+  offs <- llvm_fresh_var "offs" (llvm_int 32);
+  size <- llvm_fresh_var "size" (llvm_int 32);
+
+  llvm_execute_func [stuffer, iov, llvm_term iov_count, llvm_term offs, llvm_term size];
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+// TODO RGS: Not complete
+let s2n_stuffer_write_network_order_spec = do {
+  stuffer <- llvm_alloc (llvm_alias "struct.s2n_stuffer");
+  input <- llvm_fresh_var "input" (llvm_int 64);
+  length <- llvm_fresh_var "length" (llvm_int 8);
+
+  llvm_execute_func [stuffer, llvm_term input, llvm_term length];
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+let s2n_stuffer_write_uint8_spec = do {
+  stuffer <- llvm_alloc (llvm_alias "struct.s2n_stuffer");
+  u <- llvm_fresh_var "u" (llvm_int 8);
+
+  llvm_execute_func [stuffer, llvm_term u];
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+let s2n_stuffer_write_uint16_spec = do {
+  stuffer <- llvm_alloc (llvm_alias "struct.s2n_stuffer");
+  u <- llvm_fresh_var "u" (llvm_int 16);
+
+  llvm_execute_func [stuffer, llvm_term u];
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+let s2n_stuffer_wipe_spec (blob_size_int : Int) = do {
+  let blob_size = {{ `(blob_size_int) : [32] }};
+  (stuffer, stuffer_term) <- s2n_stuffer_alloc blob_size;
+  s2n_stuffer_validate_assert stuffer_term;
+
+  llvm_execute_func [stuffer];
+
+  // TODO RGS: memset
+
+  let stuffer_tainted = {{ 0 : [1] }};
+  let stuffer_write_cursor = {{ 0 : [32] }};
+  let stuffer_read_cursor = {{ 0 : [32] }};
+  let stuffer_high_water_mark = {{ 0 : [32] }};
+  let stuffer_term' =
+        {{ { stuffer_term
+           | tainted = stuffer_tainted
+           , write_cursor = stuffer_write_cursor
+           , read_cursor = stuffer_read_cursor
+           , high_water_mark = stuffer_high_water_mark
+           }
+        }};
+
+  llvm_points_to_bitfield stuffer "tainted" (llvm_term stuffer_tainted);
+  llvm_points_to (llvm_field stuffer "write_cursor") (llvm_term stuffer_write_cursor);
+  llvm_points_to (llvm_field stuffer "read_cursor") (llvm_term stuffer_read_cursor);
+  llvm_points_to (llvm_field stuffer "high_water_mark") (llvm_term stuffer_high_water_mark);
+  s2n_stuffer_validate_assert stuffer_term';
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+let s2n_stuffer_resize_spec
+      (old_blob_size_int : Int)
+      (new_blob_size_int : Int) = do {
+  let old_blob_size = {{ `(old_blob_size_int) : [32] }};
+  let new_blob_size = {{ `(new_blob_size_int) : [32] }};
+  (stuffer, stuffer_term) <- s2n_stuffer_alloc old_blob_size;
+
+  s2n_stuffer_validate_assert stuffer_term;
+  llvm_equal (llvm_term {{ stuffer_term.tainted }}) (llvm_term {{ 0 : [1] }});
+  llvm_assert {{ stuffer_term.growable != 0 }};
+
+  llvm_execute_func [stuffer, llvm_term new_blob_size];
+
+  if eval_bool {{ new_blob_size == 0 }}
+    then return () // s2n_free
+  else if eval_bool {{ new_blob_size < old_blob_size }}
+    then do { let stuffer_term' = {{ { stuffer_term
+                                     | blob.size = new_blob_size
+                                     , read_cursor = new_blob_size
+                                     , write_cursor = new_blob_size
+                                     , high_water_mark = new_blob_size
+                                     }
+                                  }};
+              llvm_points_to (llvm_field (llvm_field stuffer "blob") "size") (llvm_term {{ stuffer_term'.blob.size }});
+              llvm_points_to (llvm_field stuffer "read_cursor") (llvm_term {{ stuffer_term'.read_cursor }});
+              llvm_points_to (llvm_field stuffer "write_cursor") (llvm_term {{ stuffer_term'.write_cursor }});
+              llvm_points_to (llvm_field stuffer "high_water_mark") (llvm_term {{ stuffer_term'.high_water_mark }});
+              s2n_stuffer_validate_assert stuffer_term';
+            }
+    else do { let stuffer_term' = {{ { stuffer_term
+                                     | blob.size = new_blob_size
+                                     }
+                                  }};
+              llvm_points_to (llvm_field (llvm_field stuffer "blob") "size") (llvm_term {{ stuffer_term'.blob.size }});
+              s2n_stuffer_validate_assert stuffer_term';
+            };
+
+  llvm_return (llvm_term {{ S2N_SUCCESS }});
+};
+
+// let s2n_stuffer_skip_write_spec (blob_size_int : Int) = do {
+//   let blob_size = {{ `(blob_size_int) : [32] }};
+//   (stuffer, stuffer_term) <- s2n_stuffer_alloc blob_size;
+//   n <- llvm_fresh_var "n" (llvm_int 32);
+//
+//   s2n_stuffer_validate_assert stuffer_term;
+//
+//   llvm_execute_func [stuffer, llvm_term n];
+//
+//   let stuffer_term' = {{ { stuffer_term
+//                          | write_cursor -> write_cursor + n
+//                          , high_water_mark -> max (stuffer_term.write_cursor) high_water_mark
+//                          }
+//                       }};
+//   llvm_points_to (llvm_field stuffer "write_cursor") (llvm_term {{ stuffer_term'.write_cursor }});
+//   llvm_points_to (llvm_field stuffer "high_water_mark") (llvm_term {{ stuffer_term'.high_water_mark }});
+//   s2n_stuffer_validate_assert stuffer_term';
+//
+//   llvm_return (llvm_term {{ S2N_SUCCESS }});
+// };
+
+llvm <- llvm_load_module "bitcode/all_llvm.bc";
+
+let cfg = sha1_cfg; // TODO RGS: Try others
+let use_client = true; // TODO RGS: Think about this some more
+
+print "Proving s2n_record_writev memory safety...";
+
+// // hmac_digest_size_ov <- llvm_unsafe_assume_spec llvm "s2n_hmac_digest_size" (hmac_digest_size_spec cfg);
+// // record_max_write_payload_size_ov <- llvm_verify llvm "s2n_record_max_write_payload_size" [] false s2n_record_max_write_payload_size_spec (w4_unint_yices []);
+blob_validate_ov <- llvm_verify llvm "s2n_blob_validate" [] false (s2n_blob_validate_spec S2N_TLS_SEQUENCE_NUM_LEN) (w4_unint_yices []);
+blob_init_ov <- llvm_verify llvm "s2n_blob_init" [blob_validate_ov] false (s2n_blob_init_spec S2N_TLS_SEQUENCE_NUM_LEN) (w4_unint_yices []);
+blob_realloc_ov <- llvm_unsafe_assume_spec llvm "s2n_realloc" (s2n_realloc_spec S2N_TLS_SEQUENCE_NUM_LEN S2N_TLS_SEQUENCE_NUM_LEN);
+blob_free_ov <- llvm_unsafe_assume_spec llvm "s2n_free" (s2n_free_spec S2N_TLS_SEQUENCE_NUM_LEN);
+stuffer_validate_ov <- llvm_verify llvm "s2n_stuffer_validate" [blob_validate_ov] false (s2n_stuffer_validate_spec S2N_TLS_SEQUENCE_NUM_LEN) (w4_unint_yices []);
+stuffer_init_ov <- llvm_verify llvm "s2n_stuffer_init" [blob_validate_ov, stuffer_validate_ov] false (s2n_stuffer_init_spec S2N_TLS_SEQUENCE_NUM_LEN) (w4_unint_yices []);
+stuffer_wipe_spec_ov <- llvm_verify llvm "s2n_stuffer_wipe" [stuffer_validate_ov] false (s2n_stuffer_wipe_spec S2N_TLS_SEQUENCE_NUM_LEN) (w4_unint_yices []);
+add_overflow_spec_ov <- llvm_verify llvm "s2n_add_overflow" [] false s2n_add_overflow_spec (w4_unint_yices []);
+stuffer_reserve_space_ov <- llvm_unsafe_assume_spec llvm "s2n_stuffer_reserve_space" s2n_stuffer_reserve_space_spec;
+stuffer_write_bytes_ov <- llvm_unsafe_assume_spec llvm "s2n_stuffer_write_bytes" s2n_stuffer_write_bytes_spec;
+stuffer_writev_bytes_ov <- llvm_unsafe_assume_spec llvm "s2n_stuffer_writev_bytes" s2n_stuffer_writev_bytes_spec;
+stuffer_write_network_order_ov <- llvm_unsafe_assume_spec llvm "s2n_stuffer_write_network_order" s2n_stuffer_write_network_order_spec;
+stuffer_write_uint8_ov <- llvm_verify llvm "s2n_stuffer_write_uint8" [stuffer_write_bytes_ov] false s2n_stuffer_write_uint8_spec (w4_unint_yices []);
+stuffer_write_uint16_ov <- llvm_verify llvm "s2n_stuffer_write_uint16" [stuffer_write_network_order_ov] false s2n_stuffer_write_uint16_spec (w4_unint_yices []);
+stuffer_resize_ov <- llvm_verify llvm "s2n_stuffer_resize" [blob_realloc_ov, stuffer_validate_ov] false (s2n_stuffer_resize_spec S2N_TLS_SEQUENCE_NUM_LEN S2N_TLS_SEQUENCE_NUM_LEN) (w4_unint_yices []);
+// // stuffer_skip_write <- llvm_verify llvm "s2n_stuffer_skip_write" [stuffer_validate_ov, stuffer_reserve_space_ov] false (s2n_stuffer_skip_write_spec S2N_TLS_SEQUENCE_NUM_LEN) (w4_unint_yices []);
+
+// let record_writev_ovs = [ hmac_digest_size_ov
+//                         , record_max_write_payload_size_ov
+//                         , stuffer_write_bytes_ov
+//                         , stuffer_writev_bytes_ov
+//                         , stuffer_write_uint8_ov
+//                         , stuffer_write_uint16_ov
+//                         ]
+// llvm_verify llvm "s2n_record_writev" record_writev_ovs false s2n_record_writev_spec (w4_unint_yices []);
+
+print "Proofs complete!";

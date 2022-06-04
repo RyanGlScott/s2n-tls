@@ -1,0 +1,34 @@
+module s2n_record_writev where
+
+type blob =
+  { size : [32]
+  , allocated : [32]
+  , growable : [1]
+  }
+
+type stuffer =
+  { blob : blob
+  , read_cursor : [32]
+  , write_cursor : [32]
+  , high_water_mark : [32]
+  , alloced : [1]
+  , growable : [1]
+  , tainted : [1]
+  }
+
+type connection =
+  { max_outgoing_fragment_length : [16]
+  , mode : [32]
+  }
+
+s2n_blob_is_growable : blob -> Bit
+s2n_blob_is_growable b = b.growable != 0
+
+s2n_stuffer_data_available : stuffer -> Bit
+s2n_stuffer_data_available s = (s.write_cursor - s.read_cursor) != 0
+
+s2n_stuffer_space_remaining : stuffer -> Bit
+s2n_stuffer_space_remaining s = (s.blob.size - s.write_cursor) != 0
+
+s2n_stuffer_is_wiped : stuffer -> Bit
+s2n_stuffer_is_wiped s = s.high_water_mark == 0
